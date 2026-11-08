@@ -43,8 +43,7 @@ jobs:
         if: ${{ runner.os == 'Linux' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl wget file zsync libssl-dev libayatana-appindicator3-dev \
-            librsvg2-dev libwebkit2gtk-4.1-dev jq openssh-client
+          sudo apt-get install -y build-essential curl wget file zsync libssl-dev libayatana-appindicator3-dev             librsvg2-dev libwebkit2gtk-4.1-dev jq openssh-client
           # Match the minimum WebKitGTK used by release AppImages.
           webkit_version="$(pkg-config --modversion webkit2gtk-4.1)"
           echo "Building with WebKitGTK $webkit_version"
@@ -171,5 +170,14 @@ jobs:
         uses: maierj/fastlane-action@v3.2.0
         with:
           lane: build
+          options: '{"apk": true, "aab": true}'
         env:
           NDK_HOME: "${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build
+          path: |
+            src-tauri/gen/android/**/build/outputs/apk/**/*.apk
+            src-tauri/gen/android/**/build/outputs/bundle/**/*.aab
