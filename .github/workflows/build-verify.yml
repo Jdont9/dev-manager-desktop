@@ -137,6 +137,13 @@ jobs:
       - name: Install NPM Dependencies
         run: npm ci
 
+      - name: Bundle NCG addon
+        run: |
+          npm pack lg-ipk
+          tar -xzf lg-ipk-*.tgz package/ncg/dist/ncg_native.node
+          mkdir -p src/assets/lg-store
+          cp package/ncg/dist/ncg_native.node src/assets/lg-store/
+
       - name: Setup JDK
         uses: actions/setup-java@v5
         with:
