@@ -11,6 +11,18 @@
     "core:path:allow-resolve-directory",
     "fs:default",
     "fs:write-all",
+    "fs:allow-read-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        {
+          "path": "$TEMP"
+        },
+        {
+          "path": "$TEMP/**"
+        }
+      ]
+    },
     "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-save",

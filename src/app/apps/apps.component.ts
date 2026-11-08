@@ -13,6 +13,7 @@ import {APP_ID_HBCHANNEL} from "../shared/constants";
 import {HbchannelRemoveComponent} from "./hbchannel-remove/hbchannel-remove.component";
 import {StatStorageInfoComponent} from "../shared/components/stat-storage-info/stat-storage-info.component";
 import {DetailsComponent} from "./details/details.component";
+import {LgStoreComponent} from "./lg-store/lg-store.component";
 
 @Component({
     selector: 'app-apps',
@@ -97,6 +98,13 @@ export class AppsComponent implements OnInit, OnDestroy {
         } finally {
             progress.close(true);
         }
+    }
+
+    openLgStore(): void {
+        if (!this.device) return;
+        const modalRef = this.modalService.open(LgStoreComponent, {size: 'lg', scrollable: true});
+        (modalRef.componentInstance as LgStoreComponent).device = this.device;
+        modalRef.result.catch(noop).finally(() => this.storageInfo?.refresh());
     }
 
     launchApp(id: string): void {
