@@ -147,6 +147,14 @@ jobs:
       - name: Install NPM Dependencies
         run: npm ci
 
+      - name: Bundle NCG addon (Android)
+        if: startsWith(matrix.target, 'android')
+        run: |
+          npm pack lg-ipk
+          tar -xzf lg-ipk-*.tgz package/ncg/dist/ncg_native.node
+          mkdir -p src/assets/lg-store
+          cp package/ncg/dist/ncg_native.node src/assets/lg-store/
+
       - name: Build the app (Windows)
         if: startsWith(matrix.target, 'windows')
         run: |
