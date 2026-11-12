@@ -75,6 +75,7 @@ var SO_PATH = args['--so-path'] || '';
 var DEVICE_ID = args['--device-id'] || '';
 var VERIFY_FILE = args['--verify-file'] || '';
 var SECRET_DIR = args['--secret-dir'] || '/tmp/ncgrow/secret';
+var SERVICE_ID = args['--service-id'] || 'com.webos.devman.sdx';
 var TIMEOUT_MS = Number(args['--timeout'] || 30000);
 
 var APP_INFO = { sid: SID, roUrl: RO_URL };
@@ -101,13 +102,25 @@ try {
 }
 
 // SDX headers ----------------------------------------------------------------
-// Anonymous private handle (no app id); the SDX service answers it.
+// Bus handle for the SDX call. webOS 11 (fw 43.x) rejects the anonymous
+// private handle, so try the legacy anonymous variants first, then fall back
+// to a registered service identity (--service-id), which luna-service2 accepts
+// when the helper runs as a devmode-registered app with LS2 permissions.
 function openPrivateHandle() {
-  try {
-    return new palmbus.Handle('', false);
-  } catch (error) {
-    throw new Error('anonymous private palmbus handle unavailable: ' + error.message);
+  var attempts = [
+    ['anonymous private', function () { return new palmbus.Handle('', false); }],
+    ['anonymous private (geolock variant)', function () { return new palmbus.Handle('', true); }],
+    ['registered service ' + SERVICE_ID, function () { return new palmbus.Handle(SERVICE_ID, false); }]
+  ];
+  var errors = [];
+  for (var i = 0; i < attempts.length; i += 1) {
+    try {
+      return attempts[i][1]();
+    } catch (error) {
+      errors.push(attempts[i][0] + ': ' + String(error && error.message || error));
+    }
   }
+  throw new Error('anonymous private palmbus handle unavailable (' + errors.join('; ') + ')');
 }
 
 function callLunaRaw(handle, uri, payload, timeoutMs, callback) {
