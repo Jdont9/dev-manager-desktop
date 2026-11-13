@@ -2,7 +2,8 @@
  * Download apps from the LG Content Store through the TV, as IPK files.
  *
  * Based on https://github.com/lennylxx/lg-ipk-download (Apache License 2.0). The two scripts that
- * run on the TV (assets/lg-store/download-ipk.js and ro-exchange.js) are the original files; this
+ * run on the TV (assets/lg-store/download-ipk.js and ro-exchange.js) are the original files,
+ * except download-ipk.js, which also tries a registered LS2 identity (--service-id); this
  * service does what the original `lg-ipk` command line does on a computer, but through the SSH
  * connection the app already has to the TV, so that it also works on Android. Nothing is installed.
  */
@@ -137,10 +138,11 @@ export class LgStoreService {
 
     /** Searches the store. Needs Developer Mode and Node.js on the TV (already there on webOS). */
     async search(device: Device, keyword: string, country?: string): Promise<StoreApp[]> {
-        const args = ['--api-version', '10.0.0', '--timeout', '60'];
+        const args = ['--api-version', '10.0.0', '--timeout', '60', '--service-id', SDX_SERVICE_ID];
         const cc = normalizeCountry(country);
         if (cc) args.push('--country', cc);
         args.push('--search', keyword);
+        await this.grantSdxPermissions(device);
         const response = await this.withHelper(device, 'download-ipk.js', helper => this.runHelper(device, helper, args));
         return (response['apps'] ?? []) as StoreApp[];
     }
@@ -157,8 +159,10 @@ export class LgStoreService {
         try {
             // 1. The TV downloads the package from LG, with its own device credentials.
             progress(undefined, 'Asking the LG store...');
-            const args = ['--api-version', '10.0.0', '--timeout', '180', '--app-id', appId];
+            const args = ['--api-version', '10.0.0', '--timeout', '180', '--app-id', appId,
+                '--service-id', SDX_SERVICE_ID];
             if (country) args.push('--country', country);
+            await this.grantSdxPermissions(device);
             const info = await this.withHelper(device, 'download-ipk.js',
                 helper => this.runHelper(device, helper, args)) as unknown as DownloadInfo;
 

@@ -3,7 +3,11 @@
 Files in this folder come from https://github.com/lennylxx/lg-ipk-download (Apache License 2.0,
 see `LICENSE-lg-ipk-download.txt`):
 
-- `download-ipk.js`, `ro-exchange.js`: unmodified. The app pushes them to the TV over SSH and runs
+- `ro-exchange.js`: unmodified.
+- `download-ipk.js`: modified. On newer webOS the anonymous palmbus handle is refused ("Permission
+  denied"), so it now falls back to a registered service identity (`--service-id`), like
+  `ro-exchange.js` does.
+   The app pushes them to the TV over SSH and runs
   them with the TV's own Node.js.
 
 ## Optional: `ncg_native.node`

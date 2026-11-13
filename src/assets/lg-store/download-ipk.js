@@ -44,14 +44,16 @@ function die(message, detail) {
   process.exit(1);
 }
 
-function openPrivateHandle() {
-  try {
-    // Anonymous private-bus access pattern from:
-    // https://github.com/lennylxx/lg-geolock-bypass
-    return new palmbus.Handle('', false);
-  } catch (error) {
-    throw new Error('anonymous private palmbus handle unavailable: ' + error.message);
-  }
+// Modified for dev-manager-desktop: newer webOS (11 / fw 43.x) refuses the anonymous private
+// handle ("Permission denied"), so a registered service identity (--service-id) is tried too.
+var SERVICE_ID = args['--service-id'] || 'com.webos.devman.sdx';
+
+function handleCandidates() {
+  return [
+    ['anonymous private', function () { return new palmbus.Handle('', false); }],
+    ['anonymous private (geolock variant)', function () { return new palmbus.Handle('', true); }],
+    ['registered service ' + SERVICE_ID, function () { return new palmbus.Handle(SERVICE_ID, false); }]
+  ];
 }
 
 function callLunaRaw(handle, uri, payload, timeoutMs, callback) {
@@ -482,15 +484,38 @@ if (!isFinite(timeoutSeconds) || timeoutSeconds < 15 || timeoutSeconds > 3600) {
 }
 
 var handle;
-try { handle = openPrivateHandle(); } catch (error) { die(error.message); }
+var candidates = handleCandidates();
+var attemptErrors = [];
 
-callLuna(
-  handle,
-  'luna://com.webos.service.sdx/getHttpHeaderForServiceRequest',
-  {},
-  10000,
-  function (sdxError, sdx) {
-    if (sdxError) die('SDX header request failed', sdxError.message);
+function openSdxHandle(index) {
+  if (index >= candidates.length) {
+    die('SDX header request failed', attemptErrors.join('; '));
+  }
+  var name = candidates[index][0];
+  try { handle = candidates[index][1](); } catch (error) {
+    attemptErrors.push(name + ': ' + String(error && error.message || error));
+    openSdxHandle(index + 1);
+    return;
+  }
+  callLuna(
+    handle,
+    'luna://com.webos.service.sdx/getHttpHeaderForServiceRequest',
+    {},
+    10000,
+    function (sdxError, sdx) {
+      if (sdxError) {
+        attemptErrors.push(name + ': ' + sdxError.message);
+        openSdxHandle(index + 1);
+        return;
+      }
+      runWithSdx(sdx);
+    }
+  );
+}
+
+openSdxHandle(0);
+
+function runWithSdx(sdx) {
     if (!sdx.HOST || !/^[A-Za-z0-9.-]+$/.test(sdx.HOST)) {
       die('SDX returned an invalid host');
     }
@@ -620,5 +645,4 @@ callLuna(
         continueWithAppId(resolved.id);
       }
     );
-  }
-);
+}
