@@ -102,12 +102,16 @@ try {
 }
 
 // SDX headers ----------------------------------------------------------------
-// Bus handle for the SDX call. webOS 11 (fw 43.x) rejects the anonymous
-// private handle, so try the legacy anonymous variants first, then fall back
-// to a registered service identity (--service-id), which luna-service2 accepts
-// when the helper runs as a devmode-registered app with LS2 permissions.
+// Bus handle for the SDX call. webOS 11 (fw 43.x) breaks every handle whose
+// name goes through findMyAppId(): that helper walks the JS stack and builds a
+// std::string from a null script name over SSH, throwing
+// "basic_string::_S_construct null not valid". The name
+// "com.webos.service.jsserver" is special-cased in the palmbus module and
+// skips findMyAppId entirely, so it is tried first; the legacy anonymous and
+// registered-identity variants stay as fallbacks for older firmware.
 function openPrivateHandle() {
   var attempts = [
+    ['jsserver identity', function () { return new palmbus.Handle('com.webos.service.jsserver', false); }],
     ['anonymous private', function () { return new palmbus.Handle('', false); }],
     ['anonymous private (geolock variant)', function () { return new palmbus.Handle('', true); }],
     ['registered service ' + SERVICE_ID, function () { return new palmbus.Handle(SERVICE_ID, false); }]
@@ -120,7 +124,7 @@ function openPrivateHandle() {
       errors.push(attempts[i][0] + ': ' + String(error && error.message || error));
     }
   }
-  throw new Error('anonymous private palmbus handle unavailable (' + errors.join('; ') + ')');
+  throw new Error('palmbus handle unavailable (' + errors.join('; ') + ')');
 }
 
 function callLunaRaw(handle, uri, payload, timeoutMs, callback) {
