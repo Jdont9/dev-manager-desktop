@@ -25,7 +25,9 @@ import {
 } from './ncg';
 
 const NODE_ENV = 'NODE_PATH=/usr/lib/node_modules:/usr/lib/nodejs';
-const RO_WORK_DIR = '/tmp/ncgrow';
+/** /tmp is not writable by the devmode user on recent webOS; this folder is. */
+const TV_TEMP_DIR = '/media/developer/temp';
+const RO_WORK_DIR = `${TV_TEMP_DIR}/ncgrow`;
 const CEK_STORAGE_KEY = 'lgstore.ceks';
 /** Registered LS2 identity the ro-exchange helper falls back to when the anonymous private
  * palmbus handle is rejected (webOS 11 / fw 43.x). The app grants it SDX access itself. */
@@ -142,7 +144,6 @@ export class LgStoreService {
         const cc = normalizeCountry(country);
         if (cc) args.push('--country', cc);
         args.push('--search', keyword);
-        await this.grantSdxPermissions(device);
         const response = await this.withHelper(device, 'download-ipk.js', helper => this.runHelper(device, helper, args));
         return (response['apps'] ?? []) as StoreApp[];
     }
@@ -162,7 +163,6 @@ export class LgStoreService {
             const args = ['--api-version', '10.0.0', '--timeout', '180', '--app-id', appId,
                 '--service-id', SDX_SERVICE_ID];
             if (country) args.push('--country', country);
-            await this.grantSdxPermissions(device);
             const info = await this.withHelper(device, 'download-ipk.js',
                 helper => this.runHelper(device, helper, args)) as unknown as DownloadInfo;
 
@@ -331,7 +331,7 @@ export class LgStoreService {
 
     /** Pushes one of the original helper scripts to the TV, runs `fn`, and removes it. */
     private async withHelper<T>(device: Device, asset: string, fn: (remotePath: string) => Promise<T>): Promise<T> {
-        const remote = `/tmp/lg-ipk-${self.crypto.randomUUID()}.js`;
+        const remote = `${TV_TEMP_DIR}/lg-ipk-${self.crypto.randomUUID()}.js`;
         const script = await this.asset(asset);
         await this.write(device, remote, Array.from(new TextEncoder().encode(script)));
         try {
