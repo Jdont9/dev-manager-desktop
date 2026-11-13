@@ -26,6 +26,9 @@ import {
 const NODE_ENV = 'NODE_PATH=/usr/lib/node_modules:/usr/lib/nodejs';
 const RO_WORK_DIR = '/tmp/ncgrow';
 const CEK_STORAGE_KEY = 'lgstore.ceks';
+/** Registered LS2 identity the ro-exchange helper falls back to when the anonymous private
+ * palmbus handle is rejected (webOS 11 / fw 43.x). The app grants it SDX access itself. */
+const SDX_SERVICE_ID = 'com.webos.devman.sdx';
 
 export interface StoreApp {
     id: string;
@@ -272,8 +275,10 @@ export class LgStoreService {
                 '--app-id', appId,
                 '--version', ipkInfo.version,
                 '--verify-file', `${RO_WORK_DIR}/files/${base}`,
+                '--service-id', SDX_SERVICE_ID,
             ];
             if (country) args.push('--country', country);
+            await this.grantSdxPermissions(device);
             const command = `rm -f /var/log/ncgdrm-*.log 2>/dev/null; ${NODE_ENV} node ` +
                 `${RO_WORK_DIR}/ro-exchange.js ${args.map(shellQuote).join(' ')} || true`;
             const output = await this.cmd.exec(device, command, 'utf-8', undefined, true);
@@ -302,6 +307,22 @@ export class LgStoreService {
             await this.cmd.exec(device, `rm -rf ${RO_WORK_DIR}`, 'utf-8')
                 .catch(e => console.warn('Could not clean the key exchange files', e));
         }
+    }
+
+    /**
+     * Lets the registered helper identity call com.webos.service.sdx by writing an LS2
+     * client-permissions file on the TV. Best effort: on firmware where the devmode jail
+     * cannot write either bus directory, the helper falls back to its anonymous attempts.
+     */
+    private async grantSdxPermissions(device: Device): Promise<void> {
+        const permissions = JSON.stringify({[SDX_SERVICE_ID]: ['com.webos.service.sdx.*']});
+        const file = `client-permissions.d/${SDX_SERVICE_ID}.json`;
+        const command = `for d in /var/luna-service2-dev /var/luna-service2; do ` +
+            `mkdir -p "$d/client-permissions.d" 2>/dev/null && ` +
+            `printf '%s' ${shellQuote(permissions)} > "$d/${file}" 2>/dev/null && break; ` +
+            `done`;
+        await this.cmd.exec(device, command, 'utf-8', undefined, true)
+            .catch(e => console.warn('Could not write the LS2 client permissions', e));
     }
 
     /** Pushes one of the original helper scripts to the TV, runs `fn`, and removes it. */
