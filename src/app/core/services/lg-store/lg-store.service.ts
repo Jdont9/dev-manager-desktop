@@ -6,14 +6,22 @@
  * except download-ipk.js, which also tries a registered LS2 identity (--service-id); this
  * service does what the original `lg-ipk` command line does on a computer, but through the SSH
  * connection the app already has to the TV, so that it also works on Android. Nothing is installed.
+ *
+ * The NCG key exchange no longer runs over SSH: on webOS 11 (fw 43.x) every palmbus handle
+ * created outside an LS2-launched process crashes the native module
+ * ("basic_string::_S_construct null not valid"). fetchCek() therefore installs a small LS2
+ * helper service (com.webos.devman.sdx, built on the fly from assets/lg-store/tv/) and calls
+ * luna://com.webos.devman.sdx/exchange through RemoteLunaService.
  */
 import {Injectable} from '@angular/core';
 import {readFile, writeFile} from '@tauri-apps/plugin-fs';
 import {Device} from '../../../types';
 import {RemoteCommandService} from '../remote-command.service';
 import {RemoteFileService} from '../remote-file.service';
+import {RemoteLunaService} from '../remote-luna.service';
+import {AppManagerService, InstallProgressHandler} from '../app-manager.service';
 import {LocalFileService} from '../local-file.service';
-import {InstallProgressHandler} from '../app-manager.service';
+import {buildIpk, TarEntry} from './ipk';
 import {
     base64ToBytes,
     CekEntry,
@@ -32,6 +40,8 @@ const CEK_STORAGE_KEY = 'lgstore.ceks';
 /** Registered LS2 identity the ro-exchange helper falls back to when the anonymous private
  * palmbus handle is rejected (webOS 11 / fw 43.x). The app grants it SDX access itself. */
 const SDX_SERVICE_ID = 'com.webos.devman.sdx';
+/** Host app id of the bundled LS2 helper service package. */
+const SDX_APP_ID = 'com.webos.devman.sdx.app';
 
 export interface StoreApp {
     id: string;
@@ -135,7 +145,8 @@ class CekCache {
 export class LgStoreService {
 
     constructor(private cmd: RemoteCommandService, private file: RemoteFileService,
-                private localFile: LocalFileService) {
+                private localFile: LocalFileService, private luna: RemoteLunaService,
+                private appManager: AppManagerService) {
     }
 
     /** Searches the store. Needs Developer Mode and Node.js on the TV (already there on webOS). */
@@ -235,7 +246,7 @@ export class LgStoreService {
                     'Enable "Fetch the decryption key" to let the TV request it from LG once');
             }
             progress(undefined, 'Requesting the decryption key from LG (one request)...');
-            await this.fetchCek(device, appId, ipkInfo, country);
+            await this.fetchCek(device, appId, ipkInfo, country, progress);
         }
         progress(undefined, 'Decrypting the package...');
         try {
@@ -249,11 +260,14 @@ export class LgStoreService {
     }
 
     /**
-     * One live Right Object exchange, run on the TV by ro-exchange.js and the TV's own libncg_agent.
-     * Needs the prebuilt TV addon at assets/lg-store/ncg_native.node (see assets/lg-store/README.md).
+     * One live Right Object exchange, performed on the TV by the com.webos.devman.sdx LS2
+     * service and the TV's own libncg_agent (see assets/lg-store/tv/). The service is installed
+     * on demand: on webOS 11 (fw 43.x) no palmbus handle works from an SSH session, so the
+     * exchange must run inside an LS2-launched process.
      * Keep this rare: repeated requests from one device risk it being blocked by LG.
      */
-    private async fetchCek(device: Device, appId: string, ipkInfo: IpkInfo, country?: string): Promise<void> {
+    private async fetchCek(device: Device, appId: string, ipkInfo: IpkInfo,
+                           country?: string, progress?: InstallProgressHandler): Promise<void> {
         const picked = pickNcgFile(ipkInfo, appId);
         if (!picked) throw new StoreError('No NCG file found in the package');
         if (!ipkInfo.version) throw new StoreError('Could not determine the package version');
@@ -263,49 +277,39 @@ export class LgStoreService {
                 'see src/assets/lg-store/README.md');
         }
         const addon = new Uint8Array(await addonResponse.arrayBuffer());
-        const driver = await this.asset('ro-exchange.js');
         const base = picked.name.split('/').pop() ?? 'index.html';
         const toBytes = (data: Uint8Array | string) =>
             Array.from(typeof data === 'string' ? new TextEncoder().encode(data) : data);
 
         try {
+            await this.ensureExchangeService(device, progress);
             await this.cmd.exec(device, `rm -rf ${RO_WORK_DIR} && mkdir -p ${RO_WORK_DIR}/files ${RO_WORK_DIR}/secret`, 'utf-8');
-            await this.write(device, `${RO_WORK_DIR}/ro-exchange.js`, toBytes(driver));
             await this.write(device, `${RO_WORK_DIR}/ncg_native.node`, toBytes(addon));
             await this.write(device, `${RO_WORK_DIR}/files/${base}`, toBytes(picked.data));
 
-            const args = [
-                '--addon', `${RO_WORK_DIR}/ncg_native.node`,
-                '--app-id', appId,
-                '--version', ipkInfo.version,
-                '--verify-file', `${RO_WORK_DIR}/files/${base}`,
-                '--service-id', SDX_SERVICE_ID,
-            ];
-            if (country) args.push('--country', country);
-            await this.grantSdxPermissions(device);
-            const command = `rm -f /var/log/ncgdrm-*.log 2>/dev/null; ${NODE_ENV} node ` +
-                `${RO_WORK_DIR}/ro-exchange.js ${args.map(shellQuote).join(' ')} || true`;
-            const output = await this.cmd.exec(device, command, 'utf-8', undefined, true);
-            const doc = parseJsonLines(output.stdout)[0];
-
-            let cekB64: string | undefined = doc?.ok ? doc.cek?.b64 : undefined;
-            const sid: string | undefined = doc?.ok ? doc.sid : undefined;
-            if (!cekB64) {
-                // The library logs the CEK as it parses the response; used when the driver died late.
-                const grep = await this.cmd.exec(device,
-                    `grep -hoE '<cek>[A-Za-z0-9+/]{43}=</cek>' /var/log/ncgdrm-*.log 2>/dev/null | head -1`,
-                    'utf-8', undefined, true).catch(() => undefined);
-                cekB64 = grep?.stdout.match(/[A-Za-z0-9+/]{43}=/)?.[0];
+            const params: Record<string, unknown> = {
+                addonPath: `${RO_WORK_DIR}/ncg_native.node`,
+                appId,
+                appVersion: ipkInfo.version,
+                verifyFile: `${RO_WORK_DIR}/files/${base}`,
+                secretDir: `${RO_WORK_DIR}/secret`,
+            };
+            if (country) params['country'] = country;
+            const resp = await this.luna.call(device, `luna://${SDX_SERVICE_ID}/exchange`, params, false);
+            if (!resp || resp['ok'] !== true) {
+                throw new StoreError('The key exchange failed',
+                    resp ? `stage ${resp['stage']}: ${resp['error']}` : 'empty answer from the TV service');
             }
-            if (!cekB64) {
-                const why = doc && !doc.ok ? `stage ${doc.stage}: ${doc.error}` : 'no answer from the TV driver';
-                throw new StoreError('The key exchange failed', why);
+            const cekB64 = resp['cek']?.['b64'] as string | undefined;
+            const sid = resp['sid'] as string | undefined;
+            if (!cekB64 || base64ToBytes(cekB64).length !== 32) {
+                throw new StoreError('Unexpected key size from the TV');
             }
-            if (base64ToBytes(cekB64).length !== 32) throw new StoreError('Unexpected key size from the TV');
             // The cache is keyed by the content id of the NCG files, like the original tool does.
             CekCache.add(appId, {cid: picked.cid, cekB64, sid});
-            if (doc?.cek?.cid && doc.cek.cid !== picked.cid) {
-                CekCache.add(appId, {cid: doc.cek.cid, cekB64, sid});
+            const cekCid = resp['cek']?.['cid'] as string | undefined;
+            if (cekCid && cekCid !== picked.cid) {
+                CekCache.add(appId, {cid: cekCid, cekB64, sid});
             }
         } finally {
             await this.cmd.exec(device, `rm -rf ${RO_WORK_DIR}`, 'utf-8')
@@ -313,20 +317,34 @@ export class LgStoreService {
         }
     }
 
-    /**
-     * Lets the registered helper identity call com.webos.service.sdx by writing an LS2
-     * client-permissions file on the TV. Best effort: on firmware where the devmode jail
-     * cannot write either bus directory, the helper falls back to its anonymous attempts.
-     */
-    private async grantSdxPermissions(device: Device): Promise<void> {
-        const permissions = JSON.stringify({[SDX_SERVICE_ID]: ['com.webos.service.sdx.*']});
-        const file = `client-permissions.d/${SDX_SERVICE_ID}.json`;
-        const command = `for d in /var/luna-service2-dev /var/luna-service2; do ` +
-            `mkdir -p "$d/client-permissions.d" 2>/dev/null && ` +
-            `printf '%s' ${shellQuote(permissions)} > "$d/${file}" 2>/dev/null && break; ` +
-            `done`;
-        await this.cmd.exec(device, command, 'utf-8', undefined, true)
-            .catch(e => console.warn('Could not write the LS2 client permissions', e));
+    /** Installs the bundled LS2 helper service once per device; later calls reuse it. */
+    private async ensureExchangeService(device: Device, progress?: InstallProgressHandler): Promise<void> {
+        const installed = await this.appManager.info(device, SDX_APP_ID).catch(() => null);
+        if (installed) return;
+        progress?.(undefined, 'Installing the TV helper service...');
+        const files: TarEntry[] = [];
+        const add = async (path: string, asset: string) =>
+            files.push({path, data: new TextEncoder().encode(await this.asset(asset))});
+        await add('/usr/palm/applications/com.webos.devman.sdx.app/appinfo.json', 'tv/appinfo.json');
+        await add('/usr/palm/applications/com.webos.devman.sdx.app/index.html', 'tv/index.html');
+        await add('/usr/palm/services/com.webos.devman.sdx/index.js', 'tv/index.js');
+        await add('/usr/palm/services/com.webos.devman.sdx/package.json', 'tv/package.json');
+        await add('/usr/palm/services/com.webos.devman.sdx/services.json', 'tv/services.json');
+        await add('/usr/share/luna-service2/manifests.d/com.webos.devman.sdx.manifest.json', 'tv/manifest.json');
+        await add('/usr/share/luna-service2/roles.d/com.webos.devman.sdx.role.json', 'tv/role.json');
+        await add('/usr/share/luna-service2/client-permissions.d/com.webos.devman.sdx.perm.json', 'tv/perm.json');
+        await add('/usr/share/luna-service2/services.d/com.webos.devman.sdx.service', 'tv/service-file');
+        const control = 'Package: com.webos.devman.sdx.app\n' +
+            'Version: 1.0.0\nSection: webos\nArchitecture: all\n' +
+            'Maintainer: Jdont9\n' +
+            'Description: LG store key exchange helper for webOS Dev Manager\n';
+        const localPath = await this.localFile.tempPath('.ipk');
+        await writeFile(localPath, buildIpk({control, files}));
+        try {
+            await this.appManager.installByPath(device, localPath);
+        } finally {
+            await this.localFile.remove(localPath).catch(() => undefined);
+        }
     }
 
     /** Pushes one of the original helper scripts to the TV, runs `fn`, and removes it. */
