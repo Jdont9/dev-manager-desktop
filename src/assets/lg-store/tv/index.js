@@ -339,3 +339,26 @@ service.registerMethod('/exchange', function (message) {
       });
     });
 });
+
+// Proxy for the download helper (download-ipk.js): it cannot hold a working
+// palmbus handle from an SSH session on webOS 11 (fw 43.x), so it asks this
+// LS2-launched service to perform the privileged calls. Only a small
+// allow-list of services may be reached.
+var PROXY_ALLOWED = ['com.webos.service.sdx', 'com.webos.applicationManager'];
+
+service.registerMethod('/sdx', function (message) {
+  var p = message.payload || {};
+  var uri = String(p.uri || '');
+  var match = /^luna:\/\/([A-Za-z0-9._-]+)\//.exec(uri);
+  if (!match || PROXY_ALLOWED.indexOf(match[1]) === -1) {
+    message.respond({ ok: false, error: 'service not allowed through the proxy: ' + uri });
+    return;
+  }
+  service.call(uri, p.payload || {}, function (m) {
+    message.respond({ ok: true, response: (m && m.payload) || {} });
+  });
+});
+
+service.registerMethod('/ping', function (message) {
+  message.respond({ ok: true, version: '1.0.1' });
+});

@@ -483,9 +483,62 @@ if (!isFinite(timeoutSeconds) || timeoutSeconds < 15 || timeoutSeconds > 3600) {
   die('invalid timeout');
 }
 
-var handle;
+var handle = null;
 var candidates = handleCandidates();
 var attemptErrors = [];
+
+// Preferred path on webOS 11 (fw 43.x): every palmbus handle created outside an
+// LS2-launched process either crashes ("basic_string::_S_construct null not
+// valid") or is refused ("Not permitted to send"). When the com.webos.devman.sdx
+// helper service is installed, its /sdx method performs the privileged calls
+// with its own LS2 identity; the palmbus candidates stay as a fallback for
+// older firmware.
+var webosService = null;
+try { webosService = require('webos-service'); } catch (e) { webosService = null; }
+var proxyClient = null;
+
+function proxyCall(uri, payload, timeoutMs, callback) {
+  if (!webosService) {
+    callback(new Error('webos-service module unavailable'));
+    return;
+  }
+  var done = false;
+  var timer;
+  var finish = function (error, response) {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    callback(error, response);
+  };
+  timer = setTimeout(function () {
+    finish(new Error('timeout calling the ' + SERVICE_ID + ' helper'));
+  }, timeoutMs);
+  try {
+    if (!proxyClient) proxyClient = new webosService.Service(SERVICE_ID);
+    proxyClient.call('luna://com.webos.devman.sdx/sdx', { uri: uri, payload: payload || {} },
+      function (m) {
+        var p = (m && m.payload) || {};
+        if (p.ok === false) finish(new Error(p.error || 'helper call failed'));
+        else finish(null, p.response || p);
+      });
+  } catch (error) {
+    finish(error);
+  }
+}
+
+function callPrivileged(uri, payload, timeoutMs, callback, raw) {
+  proxyCall(uri, payload, timeoutMs, function (proxyError, response) {
+    if (!proxyError) {
+      callback(null, response);
+      return;
+    }
+    if (!handle) {
+      callback(proxyError);
+      return;
+    }
+    (raw ? callLunaRaw : callLuna)(handle, uri, payload, timeoutMs, callback);
+  });
+}
 
 function openSdxHandle(index) {
   if (index >= candidates.length) {
@@ -497,8 +550,7 @@ function openSdxHandle(index) {
     openSdxHandle(index + 1);
     return;
   }
-  callLuna(
-    handle,
+  callPrivileged(
     'luna://com.webos.service.sdx/getHttpHeaderForServiceRequest',
     {},
     10000,
@@ -525,8 +577,7 @@ function runWithSdx(sdx) {
     var basePath = '/apps/' + apiVersion;
 
     if (search !== undefined) {
-      callLuna(
-        handle,
+      callPrivileged(
         'luna://com.webos.service.sdx/getServerUrl',
         { serviceName: 'sdp_search' },
         10000,
@@ -558,8 +609,7 @@ function runWithSdx(sdx) {
         var storeApp = detail.app || detail;
         var storeVersion = storeApp.version || null;
 
-        callLunaRaw(
-          handle,
+        callPrivileged(
           'luna://com.webos.applicationManager/getAppInfo',
           { id: appId },
           10000,
@@ -625,7 +675,8 @@ function runWithSdx(sdx) {
                 }
               );
             });
-          }
+          },
+          true
         );
       });
     };
