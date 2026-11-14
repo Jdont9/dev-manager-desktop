@@ -1,0 +1,13 @@
+{
+  "id": "com.webos.devman.sdx",
+  "version": "1.0.0",
+  "roleFiles": [
+    "/usr/share/luna-service2/roles.d/com.webos.devman.sdx.role.json"
+  ],
+  "serviceFiles": [
+    "/usr/share/luna-service2/services.d/com.webos.devman.sdx.service"
+  ],
+  "clientPermissionFiles": [
+    "/usr/share/luna-service2/client-permissions.d/com.webos.devman.sdx.perm.json"
+  ]
+}

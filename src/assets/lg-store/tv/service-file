@@ -1,0 +1,3 @@
+[D-BUS SERVICE]
+Name=com.webos.devman.sdx
+Exec=/usr/bin/jsrun -r /usr/palm/services/com.webos.devman.sdx

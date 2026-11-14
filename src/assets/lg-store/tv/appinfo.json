@@ -1,0 +1,10 @@
+{
+  "id": "com.webos.devman.sdx.app",
+  "version": "1.0.0",
+  "vendor": "Jdont9",
+  "type": "web",
+  "main": "index.html",
+  "title": "Dev Manager Store Helper",
+  "appDescription": "LS2 helper service used by webOS Dev Manager to exchange LG store keys.",
+  "iconColor": "#3f5ebb"
+}

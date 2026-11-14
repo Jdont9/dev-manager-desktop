@@ -1,0 +1,12 @@
+{
+  "exeName": "/usr/bin/jsrun",
+  "type": "regular",
+  "allowedNames": ["com.webos.devman.sdx"],
+  "permissions": [
+    {
+      "service": "com.webos.devman.sdx",
+      "inbound": ["*"],
+      "outbound": ["*"]
+    }
+  ]
+}

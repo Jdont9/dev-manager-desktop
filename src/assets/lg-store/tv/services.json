@@ -1,0 +1,7 @@
+{
+  "id": "com.webos.devman.sdx",
+  "description": "LG store key exchange helper for webOS Dev Manager",
+  "services": [
+    { "name": "com.webos.devman.sdx" }
+  ]
+}
