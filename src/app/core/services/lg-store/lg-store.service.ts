@@ -7,11 +7,12 @@
  * service does what the original `lg-ipk` command line does on a computer, but through the SSH
  * connection the app already has to the TV, so that it also works on Android. Nothing is installed.
  *
- * The NCG key exchange no longer runs over SSH: on webOS 11 (fw 43.x) every palmbus handle
- * created outside an LS2-launched process crashes the native module
- * ("basic_string::_S_construct null not valid"). fetchCek() therefore installs a small LS2
- * helper service (com.webos.devman.sdx, built on the fly from assets/lg-store/tv/) and calls
- * luna://com.webos.devman.sdx/exchange through RemoteLunaService.
+ * On webOS 11 (fw 43.x) no palmbus handle works from an SSH session: created outside an
+ * LS2-launched process they crash the native module ("basic_string::_S_construct null not
+ * valid") or are refused. The app therefore installs a small LS2 helper service
+ * (com.webos.devman.sdx, built on the fly from assets/lg-store/tv/): the NCG key exchange runs
+ * in it (luna://com.webos.devman.sdx/exchange) and download-ipk.js routes its SDX calls through
+ * its /sdx proxy.
  */
 import {Injectable} from '@angular/core';
 import {readFile, writeFile} from '@tauri-apps/plugin-fs';
@@ -37,11 +38,13 @@ const NODE_ENV = 'NODE_PATH=/usr/lib/node_modules:/usr/lib/nodejs';
 const TV_TEMP_DIR = '/media/developer/temp';
 const RO_WORK_DIR = `${TV_TEMP_DIR}/ncgrow`;
 const CEK_STORAGE_KEY = 'lgstore.ceks';
-/** Registered LS2 identity the ro-exchange helper falls back to when the anonymous private
- * palmbus handle is rejected (webOS 11 / fw 43.x). The app grants it SDX access itself. */
+/** LS2 identity of the bundled helper service (assets/lg-store/tv/): it performs the SDX
+ * calls an SSH session is not allowed to make on webOS 11 (fw 43.x). */
 const SDX_SERVICE_ID = 'com.webos.devman.sdx';
 /** Host app id of the bundled LS2 helper service package. */
 const SDX_APP_ID = 'com.webos.devman.sdx.app';
+/** Version of the bundled helper service; bump together with tv/appinfo.json. */
+const HELPER_VERSION = '1.0.1';
 
 export interface StoreApp {
     id: string;
@@ -155,7 +158,7 @@ export class LgStoreService {
         const cc = normalizeCountry(country);
         if (cc) args.push('--country', cc);
         args.push('--search', keyword);
-        const response = await this.withHelper(device, 'download-ipk.js', helper => this.runHelper(device, helper, args));
+        const response = await this.runStoreHelper(device, 'download-ipk.js', args);
         return (response['apps'] ?? []) as StoreApp[];
     }
 
@@ -174,8 +177,8 @@ export class LgStoreService {
             const args = ['--api-version', '10.0.0', '--timeout', '180', '--app-id', appId,
                 '--service-id', SDX_SERVICE_ID];
             if (country) args.push('--country', country);
-            const info = await this.withHelper(device, 'download-ipk.js',
-                helper => this.runHelper(device, helper, args)) as unknown as DownloadInfo;
+            const info = await this.runStoreHelper(device, 'download-ipk.js', args,
+                progress) as unknown as DownloadInfo;
 
             // 2. Bring it here.
             const localPath = await this.localFile.tempPath('.ipk');
@@ -317,10 +320,25 @@ export class LgStoreService {
         }
     }
 
-    /** Installs the bundled LS2 helper service once per device; later calls reuse it. */
+    /** Runs a store helper script; on webOS 11 the first SDX attempt fails while the LS2
+     * helper service is not installed yet, so install/upgrade it once and retry. */
+    private async runStoreHelper(device: Device, asset: string, args: string[],
+                                 progress?: InstallProgressHandler): Promise<Record<string, any>> {
+        try {
+            return await this.withHelper(device, asset, helper => this.runHelper(device, helper, args));
+        } catch (e) {
+            const text = e instanceof StoreError ? e.message + ' ' + (e.detail ?? '') : String(e);
+            if (!/SDX|LS2|palmbus|not permitted|proxy/i.test(text)) throw e;
+            await this.ensureExchangeService(device, progress);
+            return this.withHelper(device, asset, helper => this.runHelper(device, helper, args));
+        }
+    }
+
+    /** Installs the bundled LS2 helper service once per device; later calls reuse it. An
+     * older installed version is upgraded in place (same package, higher version). */
     private async ensureExchangeService(device: Device, progress?: InstallProgressHandler): Promise<void> {
-        const installed = await this.appManager.info(device, SDX_APP_ID).catch(() => null);
-        if (installed) return;
+        const ping = await this.luna.call(device, `luna://${SDX_SERVICE_ID}/ping`, {}, false).catch(() => null);
+        if (ping && ping['ok'] === true && String(ping['version'] ?? '') >= HELPER_VERSION) return;
         progress?.(undefined, 'Installing the TV helper service...');
         const files: TarEntry[] = [];
         const add = async (path: string, asset: string) =>
@@ -335,7 +353,7 @@ export class LgStoreService {
         await add('/usr/share/luna-service2/client-permissions.d/com.webos.devman.sdx.perm.json', 'tv/perm.json');
         await add('/usr/share/luna-service2/services.d/com.webos.devman.sdx.service', 'tv/service-file');
         const control = 'Package: com.webos.devman.sdx.app\n' +
-            'Version: 1.0.0\nSection: webos\nArchitecture: all\n' +
+            `Version: ${HELPER_VERSION}\nSection: webos\nArchitecture: all\n` +
             'Maintainer: Jdont9\n' +
             'Description: LG store key exchange helper for webOS Dev Manager\n';
         const localPath = await this.localFile.tempPath('.ipk');
