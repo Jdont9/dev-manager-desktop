@@ -3,6 +3,11 @@
  * package. Pure TypeScript: ustar tar archives, gzip with stored (uncompressed)
  * deflate blocks, and the ar container. Nothing is actually compressed, but the
  * produced files are valid IPKs opkg and appinstalld accept.
+ *
+ * The output mirrors what real LG/webOS IPKs look like, because appinstalld is
+ * picky: data.tar.gz entries are relative ("./usr/palm/..."), every parent
+ * directory is listed explicitly as a tar directory entry, and ar header fields
+ * are space-padded like GNU ar does.
  */
 
 const encoder = new TextEncoder();
@@ -22,6 +27,12 @@ function octal(value: number, digits: number): string {
     return value.toString(8).padStart(digits, '0') + '\0';
 }
 
+/** Space-padded fixed-width text field, like GNU ar and tar write them. */
+function padField(text: string, length: number): string {
+    if (text.length > length) throw new Error('field too long: ' + text);
+    return text.padEnd(length, ' ');
+}
+
 export interface TarEntry {
     path: string;
     data?: Uint8Array;
@@ -30,36 +41,62 @@ export interface TarEntry {
     mode?: number;
 }
 
+/** "./usr/palm/x" style relative path, whatever the caller wrote. */
+function normalizePath(path: string): string {
+    let name = path.replace(/\/+/, '/');
+    while (name.startsWith('/')) name = name.slice(1);
+    if (name === '') throw new Error('empty tar path');
+    if (!name.startsWith('./')) name = './' + name;
+    return name;
+}
+
+function tarHeaderFor(name: string, type: '0' | '5', mode: number, size: number): Uint8Array {
+    const header = new Uint8Array(512);
+    const put = (text: string, offset: number, length: number) =>
+        header.set(encoder.encode(text).subarray(0, length), offset);
+    if (name.length > 100) throw new Error('Tar path too long: ' + name);
+    put(name, 0, 100);
+    put(octal(mode, 7), 100, 8);
+    put(octal(0, 7), 108, 8);
+    put(octal(0, 7), 116, 8);
+    put(octal(size, 11), 124, 12);
+    put(octal(0, 11), 136, 12);
+    put('        ', 148, 8); // checksum placeholder: spaces
+    header[156] = type === '5' ? 0x35 : 0x30;
+    put('ustar\0', 257, 6);
+    put('00', 263, 2);
+    put('root', 265, 8);
+    put('root', 297, 8);
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    put(octal(sum, 6) + ' ', 148, 8);
+    return header;
+}
+
 /** Writes a ustar archive (two trailing zero blocks included). */
 export function tar(entries: TarEntry[]): Uint8Array {
     const blocks: Uint8Array[] = [];
+    const emittedDirs = new Set<string>();
+    const emitDir = (dir: string) => {
+        // "./usr/palm/applications/" -> also emit "./usr/" and "./usr/palm/" first.
+        if (dir === './' || emittedDirs.has(dir)) return;
+        emittedDirs.add(dir);
+        const parent = dir.slice(0, dir.lastIndexOf('/', dir.length - 2) + 1);
+        if (parent) emitDir(parent);
+        blocks.push(tarHeaderFor(dir, '5', 0o755, 0));
+    };
     for (const entry of entries) {
         const isDir = entry.type === '5';
-        const name = isDir && !entry.path.endsWith('/') ? entry.path + '/' : entry.path;
-        if (name.length > 100) throw new Error('Tar path too long: ' + name);
-        const header = new Uint8Array(512);
-        const put = (text: string, offset: number, length: number) =>
-            header.set(encoder.encode(text).subarray(0, length), offset);
-        put(name, 0, 100);
-        put(octal(entry.mode ?? (isDir ? 0o755 : 0o644), 7), 100, 8);
-        put(octal(0, 7), 108, 8);
-        put(octal(0, 7), 116, 8);
-        const size = isDir ? 0 : (entry.data?.length ?? 0);
-        put(octal(size, 11), 124, 12);
-        put(octal(0, 11), 136, 12);
-        put('        ', 148, 8); // checksum placeholder: spaces
-        header[156] = entry.type ? entry.type.charCodeAt(0) : 0x30;
-        put('ustar\0', 257, 6);
-        put('00', 263, 2);
-        put('root', 265, 32);
-        put('root', 297, 32);
-        header.set(encoder.encode('0000000\0'), 329); // devmajor
-        header.set(encoder.encode('0000000\0'), 337); // devminor
-        let sum = 0;
-        for (const byte of header) sum += byte;
-        put(octal(sum, 6) + ' ', 148, 8);
-        blocks.push(header);
-        if (!isDir && entry.data) {
+        const name = normalizePath(isDir && !entry.path.endsWith('/') ? entry.path + '/' : entry.path);
+        if (isDir) {
+            emitDir(name);
+            continue;
+        }
+        const slash = name.lastIndexOf('/');
+        if (slash > 0) emitDir(name.slice(0, slash + 1));
+        const size = entry.data?.length ?? 0;
+        blocks.push(tarHeaderFor(name, '0', entry.mode ?? 0o644, size));
+        if (entry.data) {
             blocks.push(entry.data);
             const padding = (512 - (entry.data.length % 512)) % 512;
             if (padding) blocks.push(new Uint8Array(padding));
@@ -114,20 +151,21 @@ export function gzipStore(data: Uint8Array): Uint8Array {
     return concat(parts);
 }
 
-/** ar archive, the IPK container format. */
+/** ar archive, the IPK container format (GNU ar style: space-padded fields). */
 export function ar(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
     const parts: Uint8Array[] = [];
     for (const file of files) {
         const header = new Uint8Array(60);
         const put = (text: string, offset: number, length: number) =>
-            header.set(encoder.encode(text).subarray(0, length), offset);
+            header.set(encoder.encode(padField(text, length)).subarray(0, length), offset);
         put(file.name + '/', 0, 16);
         put('0', 16, 12); // mtime
         put('0', 28, 6); // uid
         put('0', 34, 6); // gid
         put('100644', 40, 8); // mode
         put(String(file.data.length), 48, 10); // size
-        put('\x60\n', 58, 2); // magic
+        header[58] = 0x60;
+        header[59] = 0x0a; // magic
         parts.push(header, file.data);
         if (file.data.length % 2) parts.push(new Uint8Array([0x0a]));
     }
