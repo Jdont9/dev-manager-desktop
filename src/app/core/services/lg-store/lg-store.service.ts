@@ -44,7 +44,7 @@ const SDX_SERVICE_ID = 'com.webos.devman.sdx';
 /** Host app id of the bundled LS2 helper service package. */
 const SDX_APP_ID = 'com.webos.devman.sdx.app';
 /** Version of the bundled helper service; bump together with tv/appinfo.json. */
-const HELPER_VERSION = '1.0.1';
+const HELPER_VERSION = '1.0.2';
 
 export interface StoreApp {
     id: string;
